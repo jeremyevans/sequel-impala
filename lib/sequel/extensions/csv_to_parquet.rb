@@ -106,7 +106,7 @@ module Sequel::CsvToParquet
                 else
                   col.gsub!(comma, comma_rep)
                 end
-                input.write(col)
+                input.write(col.strip)
                 input.write(comma)
               end
 
