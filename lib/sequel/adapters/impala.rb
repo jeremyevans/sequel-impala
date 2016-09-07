@@ -8,7 +8,10 @@ module Sequel
 
       # Exception classes used by Impala.
       ImpalaExceptions = [
-        ::Impala::Error,
+        ::Impala::InvalidQueryError,
+        ::Impala::ConnectionError,
+        ::Impala::CursorError,
+        ::Impala::ParsingError,
         ::Impala::Protocol::Beeswax::BeeswaxException,
         ::Thrift::TransportException,
         IOError
@@ -21,11 +24,13 @@ module Sequel
 
       set_adapter_scheme :impala
 
+      attr :last_cursor
+
       # Connect to the Impala server.  Currently, only the :host and :port options
       # are respected, and they default to 'localhost' and 21000, respectively.
       def connect(server)
         opts = server_opts(server)
-        ::Impala.connect(opts[:host]||'localhost', (opts[:port]||21000).to_i)
+        ::Impala.connect(opts[:host]||'localhost', (opts[:port]||21000).to_i, opts)
       end
 
       def database_error_classes
@@ -40,15 +45,25 @@ module Sequel
       def execute(sql, opts=OPTS)
         synchronize(opts[:server]) do |c|
           begin
-            cursor = log_yield(sql){c.execute(sql)}
+            @last_cursor = cursor = log_yield(sql){c.execute(sql){}}
             yield cursor if block_given?
             nil
           rescue *ImpalaExceptions => e
+            puts $!.message
+            puts $!.backtrace.join("\n")
             raise_error(e)
+          rescue
+            puts $!.message
+            puts $!.backtrace.join("\n")
+            raise
           ensure
             cursor.close if cursor && cursor.open?
           end
         end
+      end
+
+      def runtime_profile
+        last_cursor.runtime_profile
       end
 
       private
@@ -112,24 +127,40 @@ module Sequel
       }.freeze
       STRING_ESCAPE_RE = /(#{Regexp.union(STRING_ESCAPES.keys)})/
 
-      def fetch_rows(sql)
+      def fetch_rows(sql, &block)
         execute(sql) do |cursor|
-          @columns = cursor.columns.map!{|c| output_identifier(c)}
-          cursor.typecast_map['timestamp'] = db.method(:to_application_timestamp)
-          cursor.each do |row|
-            yield row
-          end
+          fetch_rows_from_cursor(cursor, &block)
         end
       end
 
+      def fetch_rows_and_profile(sql)
+        profile = nil
+        execute(sql) do |cursor|
+          begin
+            fetch_rows_from_cursor(cursor, &block)
+          ensure
+            profile = cursor.runtime_profile
+          end
+        end
+        profile
+      end
+
       private
+
+      def fetch_rows_from_cursor(cursor, &block)
+        @columns = cursor.columns.map!{|c| output_identifier(c)}
+        cursor.typecast_map['timestamp'] = db.method(:to_application_timestamp)
+        cursor.each do |row|
+          block.call(row)
+        end
+      end
 
       # Unlike the jdbc/hive2 driver, the impala driver requires you escape
       # some values in string literals to get correct results, but not the
       # tab character or things break.
       def literal_string_append(sql, s)
-        sql << APOS << s.to_s.gsub(STRING_ESCAPE_RE){|m| STRING_ESCAPES[m]} << APOS 
+        sql << APOS << s.to_s.gsub(STRING_ESCAPE_RE){|m| STRING_ESCAPES[m]} << APOS
       end
     end
   end
-end 
+end

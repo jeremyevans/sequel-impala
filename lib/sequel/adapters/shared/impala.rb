@@ -12,6 +12,22 @@ module Sequel
         end
       end
 
+      def create_table(*args)
+        super(*args)
+      end
+
+      def create_table_as(*args)
+        super(*args)
+      end
+
+      def refresh(table_name)
+        run(refresh_sql(table_name))
+      end
+
+      def compute_stats(table_name)
+        run(compute_stats_sql(table_name))
+      end
+
       # Create a database/schema in Imapala.
       #
       # Options:
@@ -98,7 +114,13 @@ module Sequel
           if schema = search_path_table_schemas[table]
             Sequel.qualify(schema, table)
           else
-            Sequel.identifier(table)
+            invalidate_table_schemas
+            if schema = search_path_table_schemas[table]
+              Sequel.qualify(schema, table)
+            else
+              puts "Double miss on #{table}"
+              Sequel.identifier(table)
+            end
           end
         when SQL::Identifier
           implicit_qualify(table.value.to_s)
@@ -167,6 +189,18 @@ module Sequel
       # includes both tables and views), and removing all valid tables.
       def views(opts=OPTS)
         _tables(opts).reject{|t| is_valid_table?(t)}
+      end
+
+      def invalidate_table_schemas
+        @search_path_table_schemas = nil
+      end
+
+      # Creates a dataset that uses the VALUES clause:
+      #
+      #   DB.values([[1, 2], [3, 4]])
+      #   VALUES ((1, 2), (3, 4))
+      def values(v)
+        @default_dataset.clone(:values=>v)
       end
 
       private
@@ -251,6 +285,14 @@ module Sequel
         sql
       end
 
+      def refresh_sql(table_name)
+        "REFRESH #{quote_schema_table(table_name)}"
+      end
+
+      def compute_stats_sql(table_name)
+        "COMPUTE STATS #{quote_schema_table(table_name)}"
+      end
+
       def drop_schema_sql(schema, options)
         "DROP SCHEMA #{'IF EXISTS ' if options[:if_exists]}#{quote_identifier(schema)}"
       end
@@ -302,6 +344,16 @@ module Sequel
         )
       end
 
+      # Impala doesn't like the word "integer"
+      def type_literal_generic_integer(column)
+        :int
+      end
+
+      # Impala doesn't like the word "biginteger"
+      def type_literal_generic_bignum(column)
+        :bigint
+      end
+
       # Impala doesn't support date columns yet, so use timestamp until date
       # is natively supported.
       def type_literal_generic_date(column)
@@ -347,8 +399,9 @@ module Sequel
       NOT = 'NOT '.freeze
       REGEXP = ' REGEXP '.freeze
       EXCEPT_SOURCE_COLUMN = :__source__
+      SELECT_VALUES = 'VALUES '.freeze
 
-      Dataset.def_sql_method(self, :select, %w'with select distinct columns from join where group having compounds order limit')
+      Dataset.def_sql_method(self, :select, [['if opts[:values]', %w'values'], ['else', %w'with select distinct columns from join where group having compounds order limit']])
 
       # Handle string concatenation using the concat string function.
       # Don't use the ESCAPE syntax when using LIKE/NOT LIKE, as
@@ -499,7 +552,7 @@ module Sequel
       def supports_cte?(type=:select)
         true
       end
-      
+
       def supports_cte_in_subqueries?
         true
       end
@@ -520,7 +573,7 @@ module Sequel
       def supports_is_true?
         false
       end
-    
+
       # Impala doesn't support IN when used with multiple columns.
       def supports_multiple_column_in?
         false
@@ -602,7 +655,7 @@ module Sequel
       def insert_empty_columns_values
         [[columns.last], [nil]]
       end
-    
+
       def literal_true
         BOOL_TRUE
       end
@@ -619,7 +672,7 @@ module Sequel
       # Double backslashes in all strings, and escape all apostrophes with
       # backslashes.
       def literal_string_append(sql, s)
-        sql << APOS << s.to_s.gsub(STRING_ESCAPE_RE, STRING_ESCAPE_REPLACE) << APOS 
+        sql << APOS << s.to_s.gsub(STRING_ESCAPE_RE, STRING_ESCAPE_REPLACE) << APOS
       end
 
       def multi_insert_sql_strategy
@@ -638,6 +691,14 @@ module Sequel
         return unless opts[:from]
         super
       end
+
+
+      # Support VALUES clause instead of the SELECT clause to return rows.
+      def select_values_sql(sql)
+        sql << SELECT_VALUES
+        expression_list_append(sql, opts[:values])
+      end
+
     end
   end
 end
